@@ -1,0 +1,29 @@
+log_level: info
+api:
+  host: 0.0.0.0
+  port: 8300
+  api_key: ''
+multica:
+  binary: multica
+  profile: ''
+  server_url: ''
+  workspace_id: ''
+  agent_id: ''
+  poll_interval: 1.2
+  run_wait_timeout: 300
+  run_timeout: 600
+  max_concurrent_rounds: 12
+  max_session_queue: 5
+dingtalk:
+  enabled: true
+  client_id: ''
+  client_secret: ''
+  card_template_id: ''
+  card_title: Multica Agent
+  show_process: false
+  stream_update_interval: 1.2
+  allowed_staff_ids: []
+  allowed_user_ids: []
+  allowed_nicks: []
+session:
+  db_path: data/sessions.db

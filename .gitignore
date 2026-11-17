@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+config/config.yaml
+config/multica-home/
+data/
+logs/
+*.db
+*.log
+.DS_Store
