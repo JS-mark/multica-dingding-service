@@ -30,6 +30,11 @@ RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} -r requirements.txt
 
 COPY app ./app
 
+# 预建挂载点并归属运行用户：named volume 模式下首次挂载会继承镜像内目录属主，
+# 不预建则 volume 以 root 初始化，容器内（uid 10001）无法写 data/logs
+RUN mkdir -p /app/config /app/data /app/logs /home/multica/.multica \
+    && chown -R multica:multica /app/config /app/data /app/logs /home/multica
+
 ENV HOME=/home/multica \
     PYTHONUNBUFFERED=1 \
     MDS_MULTICA_BINARY=/usr/local/bin/multica

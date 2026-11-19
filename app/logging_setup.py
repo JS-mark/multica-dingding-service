@@ -19,12 +19,17 @@ def setup_logging(level: str = "info", log_dir: str = "logs") -> logging.Logger:
     console.setFormatter(logging.Formatter(_FORMAT))
     root.addHandler(console)
 
-    Path(log_dir).mkdir(parents=True, exist_ok=True)
-    file_handler = TimedRotatingFileHandler(
-        Path(log_dir) / "app.log", when="midnight", backupCount=14, encoding="utf-8"
-    )
-    file_handler.setFormatter(logging.Formatter(_FORMAT))
-    root.addHandler(file_handler)
+    try:
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+        file_handler = TimedRotatingFileHandler(
+            Path(log_dir) / "app.log", when="midnight", backupCount=14, encoding="utf-8"
+        )
+        file_handler.setFormatter(logging.Formatter(_FORMAT))
+        root.addHandler(file_handler)
+    except OSError as e:
+        # 日志目录不可写（受限运行时挂载卷属主不对、只读文件系统等）：
+        # 退化为仅控制台输出（docker logs 仍可见），不阻断服务启动
+        root.warning("日志目录 %s 不可写（%s），本次运行仅输出到控制台", log_dir, e)
 
     # 第三方库降噪（根日志为 debug 时同步放开 SDK 调试日志）
     sdk_level = getattr(logging, level.upper(), logging.INFO)

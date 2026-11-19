@@ -33,6 +33,8 @@ REST调用 ──┘         │                          └─▶ agent 绑定
 
 `config/`、`data/`、`logs/` 均为 Docker 卷映射，容器重启数据不丢。
 
+> **Docker 运行时不支持宿主机目录映射（bind mount）时**——如 rootless Docker、远程 daemon、部分托管容器环境——用 [named volume 模式](#三启动)，配置全部走环境变量，数据保存在 Docker 管理的卷里。
+
 ---
 
 ## 一、准备
@@ -62,6 +64,8 @@ cp -R ~/.multica/profiles/xxxx.xxx.xxx.xxx config/multica-home/profiles/
 ```json
 {"server_url": "http://xxxx.xxxx.xxxx.xxxx", "token": "mul_..."}
 ```
+
+> 无法挂载 `multica-home` 目录的运行时（named volume 模式），改用环境变量注入：`.env` 里设 `MDS_MULTICA_TOKEN`（自部署再加 `MDS_MULTICA_SERVER_URL`），首次启动会自动生成上面的 config.json 到容器内 `~/.multica`，之后可移除该 token。
 
 查 workspace 和 agent ID：
 
@@ -98,9 +102,12 @@ cp .env.example .env
 | `multica.workspace_id` | workspace UUID |
 | `multica.agent_id` | 对话用的 agent UUID（多对一：所有白名单用户都路由到它） |
 | `multica.profile` | 认证 profile 名（与 multica-home 目录一致） |
+| `multica.token` | PAT token，启动时自动写入认证文件（无目录映射模式用，见上） |
 | `dingtalk.client_id/secret` | 钉钉 AppKey/AppSecret |
 | `dingtalk.allowed_staff_ids` | 白名单（senderStaffId，推荐） |
 | `api.api_key` | REST 鉴权（留空 = 不鉴权） |
+
+所有配置都有对应 `MDS_*` 环境变量（优先级更高）。白名单的环境变量为逗号分隔：`MDS_DINGTALK_ALLOWED_STAFF_IDS` / `MDS_DINGTALK_ALLOWED_USER_IDS` / `MDS_DINGTALK_ALLOWED_NICKS`。
 
 ## 三、启动
 
@@ -112,6 +119,28 @@ docker compose logs -f
 ```
 
 健康检查：`curl http://127.0.0.1:8300/health`
+
+#### 运行时不支持宿主机目录映射（named volume 模式）
+
+rootless Docker、远程 daemon、部分托管容器环境等不支持 bind mount（`./config`、`./data`、`./logs`）时，叠加 `docker-compose.named-volumes.yml`，把目录映射换成 Docker 管理的 named volume：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.named-volumes.yml up -d --build
+```
+
+差异：
+
+- **配置**：不能挂 `config/config.yaml`，全部走 `.env` 环境变量（含白名单 `MDS_DINGTALK_ALLOWED_STAFF_IDS` 等）
+- **multica 认证**：`.env` 里设 `MDS_MULTICA_TOKEN`（自部署加 `MDS_MULTICA_SERVER_URL`），首次启动自动写入 `multica_home` 卷；写入后可移除 token
+- **数据位置**：会话库/日志在 named volume（`docker volume ls` 可见，`multica-dingding_multica_data` 等），容器重建不丢；如需查看/备份：
+
+```bash
+# 会话库/日志
+docker run --rm -v multica-dingding_multica_data:/data -v "$PWD":/backup alpine \
+  cp /data/sessions.db /backup/
+# 进容器看日志
+docker compose -f docker-compose.yml -f docker-compose.named-volumes.yml exec multica-dingding tail -f logs/app.log
+```
 
 ### 本地开发
 
@@ -175,6 +204,16 @@ curl -N -X POST http://127.0.0.1:8300/api/chat \
 ## 七、运维要点
 
 - **daemon 必须在线**：agent 实际在你本机（或任一注册了 runtime 的机器）的 `multica daemon` 上执行。`multica daemon start` / `multica daemon autostart enable`。
-- **日志**：`logs/app.log`（容器内映射到宿主机）。
+- **日志**：`logs/app.log`（容器内映射到宿主机）；目录不可写时自动退化为仅控制台输出（`docker compose logs -f` 仍可见）。
+- **PermissionError 排查**：若启动报 `Permission denied: 'logs'` / `sessions.db`，多为旧镜像或旧卷属主是 root（Dockerfile 已预建目录并归属 uid 10001，重新 `--build` 即可）。若 named volume 在旧镜像时期已被初始化为 root 属主，重建镜像不会自动修复，需一次性处理：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.named-volumes.yml down
+# 日志卷直接删（无价值数据）
+docker volume rm multica-dingding-service_multica_logs
+# 数据/认证卷有数据，改为修正属主
+docker run --rm -v multica-dingding-service_multica_data:/d alpine chown -R 10001:10001 /d
+docker run --rm -v multica-dingding-service_multica_home:/d alpine chown -R 10001:10001 /d
+```
 - **CLI 版本**：Dockerfile 的 `MULTICA_VERSION` 构建参数控制，默认与 `api.multica.ai` 匹配的 0.10.0；国内构建慢可用 `--build-arg MULTICA_DOWNLOAD_URL=<镜像前缀>`。
 - **升级 agent**：直接改 `multica.agent_id` 后 `docker compose restart`。

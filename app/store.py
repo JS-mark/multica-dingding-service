@@ -38,9 +38,16 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_key, id);
 
 class SessionStore:
     def __init__(self, db_path: str):
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        except (OSError, sqlite3.Error) as e:
+            raise RuntimeError(
+                f"会话数据库不可用: {db_path}（{e}）。"
+                "请检查 data 挂载是否可写（属主需为运行用户 uid 10001），"
+                "或通过 session.db_path / 环境变量调整路径"
+            ) from e
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         # 不用 WAL：WAL 的共享内存索引依赖 mmap，在 Docker 卷挂载
         # （colima/virtiofs 等网络文件系统语义）上会出现提交丢失。

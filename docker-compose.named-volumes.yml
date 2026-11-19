@@ -1,0 +1,27 @@
+# 无宿主机目录映射模式 —— 适用于不支持 bind mount 的 Docker 运行时
+# （rootless Docker、远程 daemon、部分托管容器环境等）。
+#
+# 用法（与主文件叠加，同容器路径的挂载会被本文件覆盖为 named volume）：
+#   docker compose -f docker-compose.yml -f docker-compose.named-volumes.yml up -d --build
+#
+# 说明：
+# - 数据/日志/配置保存在 Docker 管理的 named volume 里，任何运行时都可用；
+#   与宿主机文件系统解耦，容器重建不丢。
+# - config.yaml 无法从宿主机挂入，全部配置走环境变量（.env 里的 MDS_*）。
+# - multica 认证：.env 里设置 MDS_MULTICA_TOKEN（和 MDS_MULTICA_SERVER_URL，
+#   自部署时），首次启动服务会自动把 token 写入 multica-home 卷的
+#   profiles/<profile>/config.json，之后可从 .env 移除该 token。
+
+services:
+  multica-dingding:
+    volumes:
+      - multica_config:/app/config
+      - multica_home:/home/multica/.multica
+      - multica_data:/app/data
+      - multica_logs:/app/logs
+
+volumes:
+  multica_config:
+  multica_home:
+  multica_data:
+  multica_logs:

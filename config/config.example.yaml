@@ -7,6 +7,9 @@ multica:
   binary: multica
   profile: ''
   server_url: ''
+  # PAT token；设置后启动时自动写入 ~/.multica/profiles/<profile>/config.json
+  # （已存在则不覆盖）。供无法挂载 multica-home 目录的 Docker 运行时注入认证
+  token: ''
   workspace_id: ''
   agent_id: ''
   poll_interval: 1.2

@@ -9,6 +9,11 @@ from typing import List
 
 import yaml
 
+
+def _csv(v: str) -> List[str]:
+    """逗号分隔 -> 列表（环境变量里配白名单用）。"""
+    return [x.strip() for x in v.split(",") if x.strip()]
+
 # 环境变量 -> 配置路径 覆盖表
 _ENV_OVERRIDES = {
     "MDS_LOG_LEVEL": ("log_level", str),
@@ -18,6 +23,7 @@ _ENV_OVERRIDES = {
     "MDS_MULTICA_BINARY": ("multica.binary", str),
     "MDS_MULTICA_PROFILE": ("multica.profile", str),
     "MDS_MULTICA_SERVER_URL": ("multica.server_url", str),
+    "MDS_MULTICA_TOKEN": ("multica.token", str),
     "MDS_MULTICA_WORKSPACE_ID": ("multica.workspace_id", str),
     "MDS_MULTICA_AGENT_ID": ("multica.agent_id", str),
     "MDS_MULTICA_POLL_INTERVAL": ("multica.poll_interval", float),
@@ -30,6 +36,9 @@ _ENV_OVERRIDES = {
     "MDS_DINGTALK_CARD_TEMPLATE_ID": ("dingtalk.card_template_id", str),
     "MDS_DINGTALK_CARD_TITLE": ("dingtalk.card_title", str),
     "MDS_DINGTALK_SHOW_PROCESS": ("dingtalk.show_process", lambda v: v.lower() in ("1", "true", "yes")),
+    "MDS_DINGTALK_ALLOWED_STAFF_IDS": ("dingtalk.allowed_staff_ids", _csv),
+    "MDS_DINGTALK_ALLOWED_USER_IDS": ("dingtalk.allowed_user_ids", _csv),
+    "MDS_DINGTALK_ALLOWED_NICKS": ("dingtalk.allowed_nicks", _csv),
 }
 
 
@@ -45,6 +54,8 @@ class MulticaSettings:
     binary: str = "multica"
     profile: str = ""
     server_url: str = ""   # multica 服务端，如 https://api.multica.ai 或自部署 http://multica.example.com；留空用 profile 默认
+    token: str = ""        # PAT token；设置后启动时自动写入 ~/.multica/profiles/<profile>/config.json（已存在则不覆盖）。
+                           # 供无法挂载 multica-home 目录的 Docker 运行时（named volume 模式）注入认证
     workspace_id: str = ""
     agent_id: str = ""
     poll_interval: float = 1.2

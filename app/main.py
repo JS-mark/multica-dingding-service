@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI
 
@@ -64,9 +67,46 @@ async def _run_dingtalk(bot: DingTalkBot) -> None:
             await asyncio.sleep(1)
 
 
+def _bootstrap_multica_auth(settings: Settings) -> None:
+    """把 multica.token 写入 CLI 认证文件 ~/.multica/profiles/<profile>/config.json。
+
+    用于无法从宿主机挂载 multica-home 目录的 Docker 运行时（named volume 模式）：
+    首次启动时经环境变量注入 token，之后认证随卷持久化，token 可从环境移除。
+    认证文件已存在（如挂载进来的 multica-home）则不覆盖。
+    """
+    m = settings.multica
+    if not m.token:
+        return
+    profile = m.profile or (
+        urlparse(m.server_url).hostname if m.server_url else "desktop-api.multica.ai"
+    )
+    cfg = Path.home() / ".multica" / "profiles" / profile / "config.json"
+    if cfg.exists():
+        if not m.profile:
+            m.profile = profile
+        return
+    try:
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(
+            json.dumps(
+                {"server_url": m.server_url or "https://api.multica.ai", "token": m.token}
+            ),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        raise RuntimeError(
+            f"无法写入 multica 认证文件 {cfg}（{e}）。"
+            "请检查 multica-home 挂载是否可写（属主需为运行用户 uid 10001）"
+        ) from e
+    if not m.profile:
+        m.profile = profile
+    logger.info("已根据 multica.token 初始化认证文件: %s", cfg)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.load()
     setup_logging(settings.log_level)
+    _bootstrap_multica_auth(settings)
 
     app = FastAPI(title="multica-dingding-service", version="1.0.0", lifespan=lifespan)
     app.state.settings = settings
