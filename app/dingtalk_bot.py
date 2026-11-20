@@ -23,7 +23,7 @@ from .dingtalk_card import (
     DEFAULT_AI_MARKDOWN_TEMPLATE,
     DingTalkAsyncClient,
 )
-from .settings import DingTalkSettings
+from .settings import DingTalkSettings, MulticaSettings
 
 logger = logging.getLogger("multica_dingding.dingtalk")
 
@@ -101,10 +101,11 @@ class _BotHandler(dingtalk_stream.AsyncChatbotHandler):
         except Exception:  # noqa: BLE001
             pass
         logger.info(
-            "收到消息: type=%s conv_type=%s conv_id=%s staff=%s nick=%s atUsers=%s text=%r",
+            "收到消息: type=%s conv_type=%s conv_id=%s senderId=%s staff=%s nick=%s atUsers=%s text=%r",
             incoming_message.message_type,
             incoming_message.conversation_type,
-            (incoming_message.conversation_id or "")[:16],
+            incoming_message.conversation_id,          # 全量（群卡片投放要用 openConversationId）
+            incoming_message.sender_id,                # unionId 形态，@人实验用
             incoming_message.sender_staff_id,
             incoming_message.sender_nick,
             at_users,
@@ -217,13 +218,24 @@ class _BotHandler(dingtalk_stream.AsyncChatbotHandler):
             await self._reply(
                 incoming_message,
                 title,
-                "**可用命令**\n- 直接发消息与我对话（支持图片/图文混合，图片会作为附件转给 agent）\n- `/new` 开始新会话（清空上下文）\n- `/issue` 查看当前会话绑定的 issue",
+                "**可用命令**\n"
+                "- 直接发消息与我对话（支持图片/图文混合，图片会作为附件转给 agent）\n"
+                "- `/new` 开始新会话（清空上下文）\n"
+                "- `/issue` 查看当前会话绑定的 issue\n"
+                "- `/ws` 查看/切换工作区（`/ws <名称|UUID>`）\n"
+                "- `/agent` 查看/切换当前工作区的 agent（`/agent <名称|UUID>`）",
             )
             return
         if low == "/issue":
             s = manager.get_session(session_key)
             issue_key = (s or {}).get("issue_key") or "无"
             await self._reply(incoming_message, title, f"当前会话 issue：`{issue_key}`")
+            return
+        if low == "/ws" or low.startswith("/ws "):
+            await self._cmd_workspace(incoming_message, title, session_key, text)
+            return
+        if low == "/agent" or low.startswith("/agent "):
+            await self._cmd_agent(incoming_message, title, session_key, text)
             return
 
         # 创建 AI 卡片（占位）。卡片 API 全部带超时；失败降级为普通消息回复。
@@ -313,19 +325,234 @@ class _BotHandler(dingtalk_stream.AsyncChatbotHandler):
             if attachments:
                 await asyncio.to_thread(self._cleanup_attachments, attachments)
 
+    # ------------------------------------------------------------------
+    # /ws 与 /agent：多工作区 / 多 agent 路由
+    def _ms(self) -> MulticaSettings:
+        return self.bot.manager.settings
+
+    def _current_target(self, session_key: str) -> Tuple[str, str]:
+        """(当前生效 workspace UUID, 会话已选 agent UUID)；agent 空串 = 待选。"""
+        s = self.bot.manager.get_session(session_key) or {}
+        m = self._ms()
+        return (
+            s.get("workspace_id") or m.workspace_id,
+            s.get("agent_id") or "",
+        )
+
+    @staticmethod
+    def _short(uuid: str) -> str:
+        return f"`{uuid[:8]}…`" if uuid and uuid != "" else "未配置"
+
+    @staticmethod
+    def _match_id(rows: list, arg: str, aliases: dict) -> str:
+        """按 UUID / 名称 / 别名 在 live 列表里匹配，返回对应 UUID；无匹配返回空串。
+
+        列表展示的是名称，选择参数理应同样接受名称——别名表只是额外的快捷方式。
+        """
+        q = arg.strip()
+        ql = q.lower()
+        for k, v in aliases.items():
+            if k == q or k.lower() == ql:
+                return v
+        for row in rows:
+            rid = row.get("id") or ""
+            if rid == q or (row.get("name") or "").lower() == ql:
+                return rid
+        return ""
+
+    def _ws_label(self, ws_id: str) -> str:
+        alias = self._ms().workspace_alias(ws_id)
+        return f"`{alias}`" if alias != ws_id else self._short(ws_id)
+
+    async def _cmd_workspace(
+        self,
+        incoming_message: dingtalk_stream.ChatbotMessage,
+        title: str,
+        session_key: str,
+        text: str,
+    ) -> None:
+        manager = self.bot.manager
+        m = self._ms()
+        parts = text.split(None, 1)
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        cur_ws, cur_agent = self._current_target(session_key)
+
+        try:
+            rows = await manager.client.list_workspaces()
+        except Exception as e:  # noqa: BLE001
+            rows, err = None, str(e)
+        else:
+            err = ""
+
+        if not arg:
+            lines = ["**工作区**", f"当前：{self._ws_label(cur_ws) if cur_ws else '未配置'}"]
+            if rows is None:
+                lines.append(f"\n⚠️ 无法获取工作区列表：{err}")
+            alias_by_id = {wid: alias for alias, wid in m.workspaces.items()}
+            if rows:
+                lines.append("\n发送 `/ws <名称|UUID>` 切换：")
+                for w in rows:
+                    wid = w.get("id") or ""
+                    alias = alias_by_id.get(wid)
+                    label = alias or (w.get("name") or wid)
+                    mark = " ←当前" if wid == cur_ws else ""
+                    extra = "" if alias else f" `{wid[:8]}…`"
+                    lines.append(f"- `{label}`{extra}{mark}")
+            elif m.workspaces:
+                lines.append("\n发送 `/ws <名称|UUID>` 切换：")
+                for alias, wid in m.workspaces.items():
+                    mark = " ←当前" if wid == cur_ws else ""
+                    lines.append(f"- `{alias}`{mark}")
+            await self._reply(incoming_message, title, "\n".join(lines))
+            return
+
+        if rows is None:
+            await self._reply(
+                incoming_message, title,
+                f"⚠️ 无法获取工作区列表（multica 调用失败：{err}），请稍后再试",
+            )
+            return
+
+        ws_id = self._match_id(rows, arg, m.workspaces)
+        if not ws_id:
+            await self._reply(
+                incoming_message, title,
+                f"⚠️ 未找到工作区 `{arg}`，发送 `/ws` 查看可选列表",
+            )
+            return
+
+        if ws_id == cur_ws:
+            # 已在该工作区：顺便给出 agent 列表（覆盖 /ws 切换后待选 agent 的场景）
+            hint = (
+                "\n\n⚠️ 当前尚未选择 agent，请先 `/agent <名称>` 选择。"
+                if not cur_agent
+                else ""
+            )
+            await self._reply(
+                incoming_message, title,
+                f"当前已在工作区 {self._ws_label(ws_id)}。\n\n"
+                + await self._agent_list_lines(ws_id)
+                + hint,
+            )
+            return
+
+        # 切工作区后原 agent 不一定在新工作区，置为待选，强制用户重新 /agent
+        manager.set_target(session_key, ws_id, "")
+        await self._reply(
+            incoming_message, title,
+            f"✅ 已切换工作区：{self._ws_label(ws_id)}\n\n"
+            + await self._agent_list_lines(ws_id)
+            + "\n\n⚠️ 请先 `/agent <名称|UUID>` 选择该工作区下的 agent，再开始对话。",
+        )
+
+    async def _cmd_agent(
+        self,
+        incoming_message: dingtalk_stream.ChatbotMessage,
+        title: str,
+        session_key: str,
+        text: str,
+    ) -> None:
+        manager = self.bot.manager
+        m = self._ms()
+        parts = text.split(None, 1)
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        cur_ws, cur_agent = self._current_target(session_key)
+        if not cur_ws:
+            await self._reply(
+                incoming_message, title,
+                "⚠️ 未配置工作区：请先配置 multica.workspace_id，或发 `/ws <名称|UUID>` 切换",
+            )
+            return
+
+        if not arg:
+            agent_label = (
+                f"`{m.agent_alias(cur_agent)}`"
+                if cur_agent and m.agent_alias(cur_agent) != cur_agent
+                else (self._short(cur_agent) if cur_agent else "未选择")
+            )
+            lines = [
+                "**当前目标**",
+                f"工作区：{self._ws_label(cur_ws)} · agent：{agent_label}",
+                "",
+                await self._agent_list_lines(cur_ws),
+            ]
+            await self._reply(incoming_message, title, "\n".join(lines))
+            return
+
+        try:
+            rows = await manager.client.list_agents(workspace_id=cur_ws)
+        except Exception as e:  # noqa: BLE001
+            await self._reply(
+                incoming_message, title,
+                f"⚠️ 无法校验 agent（multica 调用失败：{e}），请稍后再试",
+            )
+            return
+        agent_uuid = self._match_id(
+            [a for a in rows if not a.get("archived_at")], arg, m.agents
+        )
+        if not agent_uuid:
+            await self._reply(
+                incoming_message, title,
+                f"⚠️ agent `{arg}` 不在当前工作区，发送 `/agent` 查看可选列表",
+            )
+            return
+
+        alias = m.agent_alias(agent_uuid)
+        label = f"`{alias}`" if alias != agent_uuid else self._short(agent_uuid)
+        stored = manager.get_session(session_key) or {}
+        if agent_uuid == (stored.get("agent_id") or "") and stored.get("issue_id"):
+            await self._reply(
+                incoming_message, title, f"当前已是 agent {label}，会话保持不变。"
+            )
+            return
+
+        # agent 绑定在 issue 上：切换 = 断开当前会话，下一条消息新建 issue
+        manager.set_target(session_key, cur_ws, agent_uuid)
+        await self._reply(
+            incoming_message, title,
+            f"✅ 已切换 agent：{label}（工作区 {self._ws_label(cur_ws)}）\n"
+            "已开启新会话，发送消息开始对话。",
+        )
+
+    async def _agent_list_lines(self, ws_id: str) -> str:
+        """当前工作区的 agent 列表（live 查询，过滤 archived）。"""
+        m = self._ms()
+        try:
+            rows = await self.bot.manager.client.list_agents(workspace_id=ws_id)
+        except Exception as e:  # noqa: BLE001
+            return f"⚠️ 无法获取 agent 列表：{e}"
+        rows = [a for a in rows if not a.get("archived_at")]
+        if not rows:
+            return "（该工作区没有可用 agent）"
+        alias_by_id = {aid: alias for alias, aid in m.agents.items()}
+        lines = ["**该工作区的 agent**（`/agent <名称|UUID>` 选择）："]
+        for a in rows:
+            aid = a.get("id") or ""
+            alias = alias_by_id.get(aid)
+            name = a.get("name") or aid
+            if alias:
+                lines.append(f"- `{alias}` — {name}")
+            else:
+                lines.append(f"- `{name}` `{aid[:8]}…`")
+        return "\n".join(lines)
+
     async def _reply(
         self, incoming_message: dingtalk_stream.ChatbotMessage, title: str, text: str
     ) -> None:
-        """sessionWebhook 普通消息回复（带真 @；失败仅记日志）。"""
+        """sessionWebhook 普通消息回复（群聊带真 @；失败仅记日志）。
+
+        群聊 @ 提问人（会渲染成 @昵称）；单聊无需 @（回复本身即私聊语义）。
+        """
         webhook = incoming_message.session_webhook
         if not webhook:
             logger.error("sessionWebhook 缺失，无法回复")
             return
+        is_group = incoming_message.conversation_type == "2"
+        at = (incoming_message.sender_staff_id or "") if is_group else ""
         try:
-            await self.bot.dtk.reply_markdown(
-                webhook, title, text,
-                at_staff_id=incoming_message.sender_staff_id or "",
-            )
+            await self.bot.dtk.reply_markdown(webhook, title, text, at_staff_id=at)
         except Exception:  # noqa: BLE001
             logger.exception("回复 markdown 失败")
 

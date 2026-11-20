@@ -1,7 +1,7 @@
 """会话编排：把一条用户消息变成 multica 侧的一次 agent 运行，并流式产出事件。
 
 事件类型（dict，键 type）：
-  meta    {session_key, issue_key, run_id?}   本轮元信息
+  meta    {session_key, issue_key, run_id?, workspace_id?, agent_id?}  本轮元信息
   wait    {elapsed, text}                     排队进度（会话串行/全局并发/等待 run）
   status  {text}                              过程状态（思考中/执行工具…）
   delta   {text}                              回答正文增量（累积拼接）
@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from .multica_client import MulticaClient, MulticaError, RUN_ACTIVE_STATUSES
 from .settings import MulticaSettings
@@ -67,6 +67,19 @@ class ConversationManager:
     def get_session(self, session_key: str) -> Optional[dict]:
         return self.store.get_session(session_key)
 
+    def set_target(self, session_key: str, workspace_id: str, agent_id: str) -> None:
+        """设置会话路由目标（断开 issue 绑定，下一条消息按新目标新建 issue）。
+
+        agent_id 传空 = 该工作区下待选 agent。未开始的会话先建占位记录
+        （channel/user 信息在首条消息时补全）。
+        """
+        if not self.store.get_session(session_key):
+            channel, _, uid = session_key.partition(":")
+            self.store.upsert_session(
+                session_key, channel or "dingtalk", uid, "", agent_id, workspace_id
+            )
+        self.store.set_session_target(session_key, workspace_id, agent_id)
+
     # ------------------------------------------------------------------
     async def converse(
         self,
@@ -77,10 +90,14 @@ class ConversationManager:
         text: str,
         force_new: bool = False,
         attachments: Optional[List[str]] = None,
+        workspace_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """发送一条消息并流式跟随 agent 的运行。
 
         attachments: 本地文件路径列表（如钉钉图片），随消息作为 multica 附件上传。
+        workspace_id/agent_id: 本次指定的路由目标（UUID；别名由调用方先解析），
+        与会话当前目标不同则切换（断开 issue 绑定，本条消息新建 issue）。
         """
         lock = await self._session_lock(session_key)
         enqueue_t = asyncio.get_event_loop().time()
@@ -133,26 +150,58 @@ class ConversationManager:
 
             self._active_rounds += 1
             try:
+                # 生效目标：本次参数 > 会话已存 > 全局默认
+                prior = self.store.get_session(session_key)
+                stored_ws = (prior or {}).get("workspace_id") or ""
+                stored_agent = (prior or {}).get("agent_id") or ""
+                eff_ws = workspace_id or stored_ws or self.settings.workspace_id
+                eff_agent = agent_id or stored_agent or self.settings.agent_id
+
                 session = self.store.upsert_session(
-                    session_key, channel, user_id, user_name, self.settings.agent_id
+                    session_key, channel, user_id, user_name, eff_agent, eff_ws
                 )
+                # 参数显式指定了与会话不同的目标 → 视为切换（断开绑定，本条消息新建 issue）
+                if (workspace_id and workspace_id != session.get("workspace_id")) or (
+                    agent_id and agent_id != session.get("agent_id")
+                ):
+                    self.store.set_session_target(session_key, eff_ws, eff_agent)
+                    session = self.store.get_session(session_key)
                 if force_new:
                     self.store.reset_session(session_key)
                     session = self.store.get_session(session_key)
+
+                issue_ws = session.get("workspace_id") or self.settings.workspace_id
+                issue_agent = session.get("agent_id") or ""
 
                 try:
                     trigger_comment_id: Optional[str] = None
                     if session.get("issue_id"):
                         comment = await self.client.add_comment(
-                            session["issue_id"], text, attachments=attachments
+                            session["issue_id"], text,
+                            attachments=attachments, workspace_id=issue_ws,
                         )
                         trigger_comment_id = comment.get("id")
                     else:
+                        if not issue_agent:
+                            yield {
+                                "type": "error",
+                                "message": (
+                                    "当前工作区未选择 agent：请先发 /agent 查看并选择"
+                                    "（REST 请求可带 agent_id 参数）"
+                                ),
+                            }
+                            return
+                        chan_label = "钉钉" if channel == "dingtalk" else channel
+                        title = f"{chan_label} 会话 · {user_name or user_id}"
+                        alias = self.settings.agent_alias(issue_agent)
+                        if alias != issue_agent:
+                            title += f" @ {alias}"
                         issue = await self.client.create_issue(
-                            title=f"DingTalk 会话 · {user_name or user_id}",
+                            title=title,
                             description=text,
-                            assignee_id=self.settings.agent_id,
+                            assignee_id=issue_agent,
                             attachments=attachments,
+                            workspace_id=issue_ws,
                         )
                         self.store.bind_issue(session_key, issue["id"], issue["identifier"])
                         session = self.store.get_session(session_key)
@@ -162,11 +211,15 @@ class ConversationManager:
                         "type": "meta",
                         "session_key": session_key,
                         "issue_key": session.get("issue_key"),
+                        "workspace_id": issue_ws or None,
+                        "agent_id": session.get("agent_id") or None,
                     }
 
                     run = None
                     already = None
-                    async for ev in self._wait_for_run(session["issue_id"], trigger_comment_id):
+                    async for ev in self._wait_for_run(
+                        session["issue_id"], trigger_comment_id, workspace_id=issue_ws
+                    ):
                         if ev.get("type") == "run":
                             run = ev["run"]
                         elif ev.get("type") == "already_replied":
@@ -183,7 +236,10 @@ class ConversationManager:
                     run_id = run["id"]
                     yield {"type": "meta", "run_id": run_id, "issue_key": session.get("issue_key")}
 
-                    async for event in self._follow_run(session_key, session["issue_id"], run_id, trigger_comment_id):
+                    async for event in self._follow_run(
+                        session_key, session["issue_id"], run_id, trigger_comment_id,
+                        workspace_id=issue_ws,
+                    ):
                         if event.get("type") == "done":
                             event["queued_secs"] = queued_secs
                         yield event
@@ -203,7 +259,10 @@ class ConversationManager:
 
     # ------------------------------------------------------------------
     async def _wait_for_run(
-        self, issue_id: str, trigger_comment_id: Optional[str]
+        self,
+        issue_id: str,
+        trigger_comment_id: Optional[str],
+        workspace_id: Optional[str] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """轮询【完整 run 历史】（非 active），直到找到本轮触发的 run。
 
@@ -225,7 +284,7 @@ class ConversationManager:
         polls = 0
         while asyncio.get_event_loop().time() < deadline:
             try:
-                runs = await self.client.list_runs(issue_id)
+                runs = await self.client.list_runs(issue_id, workspace_id=workspace_id)
                 failures = 0
             except MulticaError as e:
                 failures += 1
@@ -252,7 +311,9 @@ class ConversationManager:
             # 但 agent 可能已直接在触发评论线程下回复 —— 每隔几轮检查一次
             if trigger_comment_id and polls % 4 == 0:
                 try:
-                    reply = await self._final_answer(issue_id, trigger_comment_id, run_id=None)
+                    reply = await self._final_answer(
+                        issue_id, trigger_comment_id, None, workspace_id=workspace_id
+                    )
                 except Exception:  # noqa: BLE001
                     reply = None
                 if reply:
@@ -272,6 +333,7 @@ class ConversationManager:
         issue_id: str,
         run_id: str,
         trigger_comment_id: Optional[str],
+        workspace_id: Optional[str] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         poll = max(0.5, self.settings.poll_interval)
         deadline = asyncio.get_event_loop().time() + self.settings.run_timeout
@@ -281,8 +343,8 @@ class ConversationManager:
         failures = 0
         while True:
             try:
-                msgs = await self.client.run_messages(run_id, since=since)
-                runs = await self.client.list_runs(issue_id, active_only=True)
+                msgs = await self.client.run_messages(run_id, since=since, workspace_id=workspace_id)
+                runs = await self.client.list_runs(issue_id, active_only=True, workspace_id=workspace_id)
                 failures = 0
             except MulticaError as e:
                 failures += 1
@@ -316,14 +378,18 @@ class ConversationManager:
             await asyncio.sleep(poll + random.uniform(0, 0.4))
 
         # 终态：完整回复优先取 agent 在触发评论线程下的评论
-        final = await self._final_answer(issue_id, trigger_comment_id, run_id)
+        final = await self._final_answer(issue_id, trigger_comment_id, run_id, workspace_id=workspace_id)
         if final is None:
             final = answer_text.strip() or "（agent 没有产生回复）"
         self.store.add_message(session_key, "agent", final, run_id)
         yield {"type": "done", "answer": final, "run_id": run_id}
 
     async def _final_answer(
-        self, issue_id: str, trigger_comment_id: Optional[str], run_id: str
+        self,
+        issue_id: str,
+        trigger_comment_id: Optional[str],
+        run_id: Optional[str],
+        workspace_id: Optional[str] = None,
     ) -> Optional[str]:
         """从评论线程找 agent 的最终回复。
 
@@ -331,7 +397,7 @@ class ConversationManager:
         - 首条消息触发：取最新的 agent 顶层评论（run 结束后写入）
         """
         try:
-            comments = await self.client.list_comments(issue_id)
+            comments = await self.client.list_comments(issue_id, workspace_id=workspace_id)
         except MulticaError:
             return None
         if not isinstance(comments, list):

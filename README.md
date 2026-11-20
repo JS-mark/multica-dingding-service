@@ -1,6 +1,6 @@
 # multica-dingding-service
 
-把 [multica](https://github.com/multica-ai/multica) CLI 封装成 REST 服务，对接**钉钉机器人**：服务是纯粹的**多对一中转** —— 多个白名单用户（钉钉/REST 各自独立会话）都路由到**同一个 multica agent**，回复以 **AI 卡片流式打字机**效果呈现。multica 服务端地址完全由配置决定（官方云或自部署实例均可）。
+把 [multica](https://github.com/multica-ai/multica) CLI 封装成 REST 服务，对接**钉钉机器人**：服务是纯粹的中转 —— 多个白名单用户（钉钉/REST 各自独立会话）各自路由到**选定的 multica 工作区/agent**（默认单一 agent，也可会话内 `/ws`+`/agent` 切换多目标），回复以 **AI 卡片流式打字机**效果呈现。multica 服务端地址完全由配置决定（官方云或自部署实例均可）。
 
 ```
 钉钉用户A ─┐                                    ┌─▶ multica 服务端（可配置）
@@ -16,6 +16,7 @@ REST调用 ──┘         │                          └─▶ agent 绑定
 ## 架构说明
 
 - **会话模型**：每个用户一个长期会话，对应 multica 里的一个 issue。首条消息 = issue 描述，后续消息 = issue 评论，agent 在评论线程回复。`/new`（钉钉）或 `POST /api/sessions/{key}/reset`（REST）可重置。
+- **多工作区/多 agent 路由**：`multica.workspace_id/agent_id` 是全局默认；每个会话可独立选择目标——钉钉里 `/ws <工作区>` + `/agent <agent>`，REST `/api/chat` 带 `workspace_id/agent_id` 参数（别名或 UUID）。agent 绑定在 issue 上，**切换目标 = 新会话**（上下文不跨 agent）。
 - **流式实现**：轮询 `multica issue run-messages --since <seq>` 拿增量消息（思考/工具/正文），节流推送到钉钉 AI 卡片（打字机效果）；REST 侧直接以 **SSE** 流式返回。
 - **权限**：钉钉白名单（staffId / userId / 昵称），**白名单为空 = 拒绝所有人**；REST 可选 `X-API-Key` 鉴权。
 - **agent 执行位置**：agent 由你机器上的 `multica daemon` 在本地 runtime（Claude/Codex 等）执行。容器内的服务只调 api.multica.ai 的 CLI 命令，**daemon 必须在你的机器上保持运行**（`multica daemon status` 查看）。
@@ -99,8 +100,10 @@ cp .env.example .env
 | 配置项 | 说明 |
 |---|---|
 | `multica.server_url` | multica 服务端（留空=官方云 `api.multica.ai`；自部署填实例地址） |
-| `multica.workspace_id` | workspace UUID |
-| `multica.agent_id` | 对话用的 agent UUID（多对一：所有白名单用户都路由到它） |
+| `multica.workspace_id` | 默认 workspace UUID（会话未选择时用） |
+| `multica.agent_id` | 默认 agent UUID（会话未选择时用） |
+| `multica.workspaces` | 可选工作区别名表 `{别名: UUID}`（环境变量 `MDS_MULTICA_WORKSPACES`，JSON） |
+| `multica.agents` | 可选 agent 别名表 `{别名: UUID}`（环境变量 `MDS_MULTICA_AGENTS`，JSON） |
 | `multica.profile` | 认证 profile 名（与 multica-home 目录一致） |
 | `multica.token` | PAT token，启动时自动写入认证文件（无目录映射模式用，见上） |
 | `dingtalk.client_id/secret` | 钉钉 AppKey/AppSecret |
@@ -163,7 +166,8 @@ python -m app.main
 | GET | `/api/sessions` | 会话列表 |
 | GET | `/api/sessions/{key}/messages` | 会话最近消息 |
 | POST | `/api/sessions/{key}/reset` | 重置会话 |
-| GET | `/api/agents` | workspace agent 列表 |
+| GET | `/api/workspaces` | workspace 列表（含别名/默认标记） |
+| GET | `/api/agents` | agent 列表（`?workspace_id=` 支持别名） |
 
 除 `/health` 外，若配置了 `api_key`，请求需带 `X-API-Key` 头。
 
@@ -173,6 +177,11 @@ SSE 聊天示例：
 curl -N -X POST http://127.0.0.1:8300/api/chat \
   -H 'Content-Type: application/json' \
   -d '{"message":"你好","session_id":"mark"}'
+
+# 指定工作区/agent（别名或 UUID；指定后会话切换到该目标并新建会话）
+curl -N -X POST http://127.0.0.1:8300/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"你好","session_id":"mark","workspace_id":"docs","agent_id":"coder"}'
 ```
 
 事件类型（`data: {"type": ...}`）：
@@ -190,6 +199,7 @@ curl -N -X POST http://127.0.0.1:8300/api/chat \
 - **全局上限**：最多 `multica.max_concurrent_rounds`（默认 12）轮同时执行，超出排队并显示进度；到达上限说明 agent runtime 或服务达到容量瓶颈，可调大（注意 agent 侧 `max_concurrent_tasks` 也要配套）
 - **单会话排队上限**：`multica.max_session_queue`（默认 5）—— 同一用户最多 5 条消息同时排队，超出直接拒绝并提示，防止消息无限堆积
 - **排队等待上限**：`run_wait_timeout`（默认 300s）内 run 未出现则报错提示
+- **单轮运行上限**：`run_timeout`（默认 7200s = 2h）内 run 未跑完则报错并停止跟随（agent 侧继续执行，最终回复落在 issue 评论里）；超时后卡片不再更新
 - **轮询抖动**：多轮并发时轮询节奏带随机抖动，避免 CLI 子进程惊群
 - 单实例设计。多实例部署需共享 SQLite 且各自持有会话锁，不推荐
 
@@ -199,7 +209,17 @@ curl -N -X POST http://127.0.0.1:8300/api/chat \
 
 - `/new` — 新会话（清空上下文）
 - `/issue` — 查看当前会话绑定的 issue
+- `/ws` — 查看工作区列表；`/ws <名称|UUID>` 切换工作区（切换后需重选 agent）
+- `/agent` — 查看当前工作区的 agent 列表；`/agent <名称|UUID>` 切换 agent（自动新开会话）
 - `/help` — 帮助
+
+多 agent 用法（先选工作区、再选 agent，两步都完成后即可对话）：
+
+```text
+/ws docs          → ✅ 已切换工作区（并列出该工作区 agent）
+/agent coder      → ✅ 已切换 agent，已开启新会话
+你好              → 正常对话，路由到 docs 工作区的 coder agent
+```
 
 ## 七、运维要点
 
@@ -216,4 +236,4 @@ docker run --rm -v multica-dingding-service_multica_data:/d alpine chown -R 1000
 docker run --rm -v multica-dingding-service_multica_home:/d alpine chown -R 10001:10001 /d
 ```
 - **CLI 版本**：Dockerfile 的 `MULTICA_VERSION` 构建参数控制，默认与 `api.multica.ai` 匹配的 0.10.0；国内构建慢可用 `--build-arg MULTICA_DOWNLOAD_URL=<镜像前缀>`。
-- **升级 agent**：直接改 `multica.agent_id` 后 `docker compose restart`。
+- **升级 agent**：改 `multica.agent_id`（默认目标）后 `docker compose restart`；已有会话的 agent 已绑定在 issue 上，会话内 `/agent <名称>` 切换或 `/new` 后生效。

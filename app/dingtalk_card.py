@@ -142,13 +142,19 @@ class DingTalkAsyncClient:
         text: str,
         at_staff_id: str = "",
     ) -> None:
-        """sessionWebhook 回复 markdown（带 at.atUserIds，真 @）。"""
+        """sessionWebhook 回复 markdown（带 at.atUserIds，真 @）。
+
+        与 SDK ChatbotClient.reply_markdown 同通道（sessionWebhook，群/单聊均可）。
+        官方《群聊@人接入指南》：atUserIds 要在 text 里有对应的 @userId 占位符
+        才会渲染成 @昵称并触发提醒，缺占位符时 @ 不生效 —— 这里自动补。
+        """
         body: dict = {
             "msgtype": "markdown",
             "markdown": {"title": title, "text": text},
         }
         if at_staff_id:
             body["at"] = {"atUserIds": [at_staff_id]}
+            body["markdown"]["text"] = f"@{at_staff_id} {text}"
         resp = await self._http.post(session_webhook, json=body)
         resp.raise_for_status()
 

@@ -14,15 +14,16 @@ from typing import List, Optional
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
-    key         TEXT PRIMARY KEY,
-    channel     TEXT NOT NULL,           -- dingtalk | api
-    user_id     TEXT NOT NULL,           -- 渠道内用户标识
-    user_name   TEXT DEFAULT '',
-    issue_id    TEXT,
-    issue_key   TEXT,
-    agent_id    TEXT,
-    created_at  REAL NOT NULL,
-    updated_at  REAL NOT NULL
+    key           TEXT PRIMARY KEY,
+    channel       TEXT NOT NULL,         -- dingtalk | api
+    user_id       TEXT NOT NULL,         -- 渠道内用户标识
+    user_name     TEXT DEFAULT '',
+    issue_id      TEXT,
+    issue_key     TEXT,
+    agent_id      TEXT,                  -- NULL = 会话级未选 agent（如 /ws 切换后待选）
+    workspace_id  TEXT,                  -- 会话路由的工作区；NULL = 用全局默认
+    created_at    REAL NOT NULL,
+    updated_at    REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS messages (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +56,14 @@ class SessionStore:
         self._conn.execute("PRAGMA journal_mode=DELETE")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """旧库无损迁移：CREATE TABLE IF NOT EXISTS 不会给已有表加列，需 ALTER。"""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(sessions)")}
+        if "workspace_id" not in cols:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN workspace_id TEXT")
 
     def _execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         with self._lock:
@@ -71,16 +79,33 @@ class SessionStore:
         return dict(row) if row else None
 
     def upsert_session(
-        self, key: str, channel: str, user_id: str, user_name: str, agent_id: str
+        self,
+        key: str,
+        channel: str,
+        user_id: str,
+        user_name: str,
+        agent_id: str,
+        workspace_id: str = "",
     ) -> dict:
         now = time.time()
+        # ON CONFLICT 不更新 agent_id/workspace_id：会话目标只随 set_session_target 显式切换
         self._execute(
-            """INSERT INTO sessions (key, channel, user_id, user_name, agent_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO sessions (key, channel, user_id, user_name, agent_id, workspace_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(key) DO UPDATE SET user_name = excluded.user_name, updated_at = excluded.updated_at""",
-            (key, channel, user_id, user_name, agent_id, now, now),
+            (key, channel, user_id, user_name, agent_id, workspace_id, now, now),
         )
         return self.get_session(key)
+
+    def set_session_target(self, key: str, workspace_id: str, agent_id: str) -> None:
+        """设置会话路由目标并断开 issue 绑定（下一条消息按新目标新建 issue）。
+
+        agent_id 传 None/'' 表示该工作区下未选 agent（写 NULL，converse 会提示先选）。
+        """
+        self._execute(
+            "UPDATE sessions SET workspace_id = ?, agent_id = ?, issue_id = NULL, issue_key = NULL, updated_at = ? WHERE key = ?",
+            (workspace_id, agent_id or None, time.time(), key),
+        )
 
     def bind_issue(self, key: str, issue_id: str, issue_key: str) -> None:
         self._execute(

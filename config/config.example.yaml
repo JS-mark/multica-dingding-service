@@ -11,10 +11,14 @@ multica:
   # （已存在则不覆盖）。供无法挂载 multica-home 目录的 Docker 运行时注入认证
   token: ''
   workspace_id: ''
+  # 可选：工作区/agent 别名表（/ws、/agent 命令与 REST 参数均接受别名或 UUID）
+  # 例：workspaces: {main: <uuid>, docs: <uuid>} / agents: {coder: <uuid>, writer: <uuid>}
+  workspaces: {}
   agent_id: ''
+  agents: {}
   poll_interval: 1.2
   run_wait_timeout: 300
-  run_timeout: 600
+  run_timeout: 7200
   max_concurrent_rounds: 12
   max_session_queue: 5
 dingtalk:

@@ -6,7 +6,8 @@
 - GET  /api/sessions               会话列表
 - GET  /api/sessions/{key}/messages 最近消息
 - POST /api/sessions/{key}/reset   重置会话（下一条消息新建 issue）
-- GET  /api/agents                 workspace agent 列表（便于查 agent_id）
+- GET  /api/workspaces             workspace 列表
+- GET  /api/agents                 agent 列表（?workspace_id= 指定工作区，支持别名）
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -37,6 +38,14 @@ class ChatRequest(BaseModel):
     )
     user: Optional[str] = Field(default="api-user", description="调用方标识（仅记录用）")
     new_session: bool = Field(default=False, description="为该 session 新开一个 issue")
+    workspace_id: Optional[str] = Field(
+        default=None,
+        description="目标工作区（别名或 UUID）；指定后本会话路由到它，随消息新建 issue",
+    )
+    agent_id: Optional[str] = Field(
+        default=None,
+        description="目标 agent（别名或 UUID，须属于目标工作区）；指定后本会话路由到它",
+    )
 
 
 def _get_deps(request: Request):
@@ -65,12 +74,15 @@ async def info(request: Request, x_api_key: Optional[str] = Header(default=None)
     settings, _, _ = _get_deps(request)
     _auth(settings, x_api_key)
     d = settings.dingtalk
+    m = settings.multica
     return {
         "multica": {
-            "profile": settings.multica.profile,
-            "server_url": settings.multica.server_url or "(profile 默认)",
-            "workspace_id": settings.multica.workspace_id,
-            "agent_id": settings.multica.agent_id,
+            "profile": m.profile,
+            "server_url": m.server_url or "(profile 默认)",
+            "workspace_id": m.workspace_id,
+            "agent_id": m.agent_id,
+            "workspace_aliases": m.workspaces,
+            "agent_aliases": m.agents,
         },
         "dingtalk": {
             "enabled": d.enabled,
@@ -88,10 +100,19 @@ async def chat(
 ):
     settings, manager, _ = _get_deps(request)
     _auth(settings, x_api_key)
-    if not settings.multica.agent_id:
-        raise HTTPException(status_code=503, detail="未配置 multica.agent_id")
 
     session_key = f"api:{body.session_id or 'default'}"
+    m = settings.multica
+    stored = manager.store.get_session(session_key) or {}
+    if not (body.agent_id or m.agent_id or stored.get("agent_id")):
+        raise HTTPException(
+            status_code=400,
+            detail="未指定 agent：body 带 agent_id（GET /api/agents 查询，支持别名）"
+                   "或配置 multica.agent_id",
+        )
+    # 别名 -> UUID（未知别名按原串传给 CLI，由 converse 的校验兜底）
+    ws_param = m.resolve_workspace(body.workspace_id) if body.workspace_id else None
+    agent_param = m.resolve_agent(body.agent_id) if body.agent_id else None
 
     async def event_stream():
         try:
@@ -102,6 +123,8 @@ async def chat(
                 body.user or "api-user",
                 body.message,
                 force_new=body.new_session,
+                workspace_id=ws_param,
+                agent_id=agent_param,
             ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as e:  # noqa: BLE001
@@ -144,18 +167,50 @@ async def session_reset(
     return {"ok": True}
 
 
-@router.get("/api/agents")
-async def agents(request: Request, x_api_key: Optional[str] = Header(default=None)):
+@router.get("/api/workspaces")
+async def workspaces(request: Request, x_api_key: Optional[str] = Header(default=None)):
     settings, _, client = _get_deps(request)
     _auth(settings, x_api_key)
     try:
-        rows = await client.list_agents()
+        rows = await client.list_workspaces()
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"multica 调用失败: {e}") from e
+    m = settings.multica
+    alias_by_id = {wid: alias for alias, wid in m.workspaces.items()}
+    return [
+        {
+            "id": w.get("id"),
+            "name": w.get("name"),
+            "alias": alias_by_id.get(w.get("id")),
+            "is_default": w.get("id") == m.workspace_id,
+        }
+        for w in rows
+    ]
+
+
+@router.get("/api/agents")
+async def agents(
+    request: Request,
+    workspace_id: Optional[str] = Query(
+        default=None, description="工作区别名或 UUID；留空用默认工作区"
+    ),
+    x_api_key: Optional[str] = Header(default=None),
+):
+    settings, _, client = _get_deps(request)
+    _auth(settings, x_api_key)
+    m = settings.multica
+    try:
+        rows = await client.list_agents(
+            workspace_id=m.resolve_workspace(workspace_id) if workspace_id else None
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"multica 调用失败: {e}") from e
+    alias_by_id = {aid: alias for alias, aid in m.agents.items()}
     return [
         {
             "id": a.get("id"),
             "name": a.get("name"),
+            "alias": alias_by_id.get(a.get("id")),
             "model": a.get("model"),
             "status": a.get("status"),
             "runtime_mode": a.get("runtime_mode"),

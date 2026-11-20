@@ -1,8 +1,11 @@
 # multica-dingding-service
 # 构建: docker build -t multica-dingding-service .
 # 多架构: buildx 自动注入 TARGETARCH (amd64/arm64)
+# 国内拉不动 docker hub 时换基础镜像源，如：
+#   --build-arg PYTHON_BASE=docker.m.daocloud.io/library/python:3.12-slim
 
-FROM python:3.12-slim
+ARG PYTHON_BASE=python:3.12-slim
+FROM ${PYTHON_BASE}
 
 ARG MULTICA_VERSION=0.10.0
 # 国内网络可替换为镜像地址，如 ghproxy 类前缀

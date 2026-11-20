@@ -39,7 +39,9 @@ async def lifespan(app: FastAPI):
                 logger.warning("钉钉白名单为空：机器人将拒绝所有人（请在配置中填写 allowed_staff_ids）")
             dtask = asyncio.create_task(_run_dingtalk(bot))
     if not settings.multica.agent_id:
-        logger.warning("未配置 multica.agent_id：/api/chat 与钉钉对话不可用")
+        logger.warning(
+            "未配置 multica.agent_id 默认值：会话需先 /agent 选择（或 REST 请求带 agent_id）"
+        )
     yield
     if dtask:
         dtask.cancel()

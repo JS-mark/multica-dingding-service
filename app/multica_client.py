@@ -36,14 +36,18 @@ class MulticaClient:
         self.server_url = server_url
         self.timeout = timeout
 
-    async def _run(self, *args: str, timeout: Optional[float] = None) -> Any:
+    async def _run(
+        self, *args: str, timeout: Optional[float] = None, workspace_id: Optional[str] = None
+    ) -> Any:
         cmd = [self.binary]
         if self.profile:
             cmd += ["--profile", self.profile]
         if self.server_url:
             cmd += ["--server-url", self.server_url]
-        if self.workspace_id:
-            cmd += ["--workspace-id", self.workspace_id]
+        # 会话可路由到非默认工作区：按调用覆盖，None = 用构造时的默认
+        ws = workspace_id if workspace_id is not None else self.workspace_id
+        if ws:
+            cmd += ["--workspace-id", ws]
         cmd += list(args)
 
         logger.debug("exec: %s", " ".join(cmd))
@@ -84,15 +88,24 @@ class MulticaClient:
         raise MulticaError(f"无法解析 multica 输出: {out[:300]}")
 
     # ------------------------------------------------------------------
+    # workspace
+    async def list_workspaces(self) -> List[Dict[str, Any]]:
+        return await self._run("workspace", "list", "--output", "json")
+
+    # ------------------------------------------------------------------
     # agent
-    async def list_agents(self) -> List[Dict[str, Any]]:
-        return await self._run("agent", "list", "--output", "json")
+    async def list_agents(self, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        return await self._run("agent", "list", "--output", "json", workspace_id=workspace_id)
 
     # ------------------------------------------------------------------
     # issue
     async def create_issue(
-        self, title: str, description: str, assignee_id: str,
+        self,
+        title: str,
+        description: str,
+        assignee_id: str,
         attachments: Optional[List[str]] = None,
+        workspace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         args = [
             "issue", "create",
@@ -108,31 +121,41 @@ class MulticaClient:
                 args += ["--attachment", p]
             timeout = 120
         args += ["--output", "json"]
-        return await self._run(*args, timeout=timeout)
+        return await self._run(*args, timeout=timeout, workspace_id=workspace_id)
 
-    async def get_issue(self, issue_id: str) -> Dict[str, Any]:
-        return await self._run("issue", "get", issue_id, "--output", "json")
+    async def get_issue(
+        self, issue_id: str, workspace_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return await self._run("issue", "get", issue_id, "--output", "json", workspace_id=workspace_id)
 
-    async def delete_issue(self, issue_id: str) -> None:
-        await self._run("issue", "delete", issue_id, "--yes")
+    async def delete_issue(self, issue_id: str, workspace_id: Optional[str] = None) -> None:
+        await self._run("issue", "delete", issue_id, "--yes", workspace_id=workspace_id)
 
-    async def list_runs(self, issue_id: str, active_only: bool = False) -> List[Dict[str, Any]]:
+    async def list_runs(
+        self, issue_id: str, active_only: bool = False, workspace_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         args = ["issue", "runs", issue_id, "--output", "json"]
         if active_only:
             args.append("--active")
-        return await self._run(*args)
+        return await self._run(*args, workspace_id=workspace_id)
 
-    async def run_messages(self, run_id: str, since: int = 0) -> List[Dict[str, Any]]:
+    async def run_messages(
+        self, run_id: str, since: int = 0, workspace_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         return await self._run(
             "issue", "run-messages", run_id,
             "--since", str(since), "--output", "json",
-            timeout=60,
+            timeout=60, workspace_id=workspace_id,
         )
 
     # ------------------------------------------------------------------
     # comment
     async def add_comment(
-        self, issue_id: str, content: str, attachments: Optional[List[str]] = None,
+        self,
+        issue_id: str,
+        content: str,
+        attachments: Optional[List[str]] = None,
+        workspace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """添加顶层评论；返回的 dict 含 id（评论 ID，用于匹配触发的新 run）。"""
         args = ["issue", "comment", "add", issue_id, "--content", content]
@@ -143,7 +166,11 @@ class MulticaClient:
                 args += ["--attachment", p]
             timeout = 120
         args += ["--output", "json"]
-        return await self._run(*args, timeout=timeout)
+        return await self._run(*args, timeout=timeout, workspace_id=workspace_id)
 
-    async def list_comments(self, issue_id: str) -> List[Dict[str, Any]]:
-        return await self._run("issue", "comment", "list", issue_id, "--output", "json")
+    async def list_comments(
+        self, issue_id: str, workspace_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        return await self._run(
+            "issue", "comment", "list", issue_id, "--output", "json", workspace_id=workspace_id
+        )

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 import yaml
 
@@ -13,6 +14,15 @@ import yaml
 def _csv(v: str) -> List[str]:
     """逗号分隔 -> 列表（环境变量里配白名单用）。"""
     return [x.strip() for x in v.split(",") if x.strip()]
+
+
+def _json_dict(v: str) -> Dict[str, str]:
+    """JSON 对象字符串 -> dict（环境变量里配别名表用）。"""
+    try:
+        d = json.loads(v)
+    except json.JSONDecodeError:
+        return {}
+    return {str(k): str(val) for k, val in d.items()} if isinstance(d, dict) else {}
 
 # 环境变量 -> 配置路径 覆盖表
 _ENV_OVERRIDES = {
@@ -25,7 +35,9 @@ _ENV_OVERRIDES = {
     "MDS_MULTICA_SERVER_URL": ("multica.server_url", str),
     "MDS_MULTICA_TOKEN": ("multica.token", str),
     "MDS_MULTICA_WORKSPACE_ID": ("multica.workspace_id", str),
+    "MDS_MULTICA_WORKSPACES": ("multica.workspaces", _json_dict),
     "MDS_MULTICA_AGENT_ID": ("multica.agent_id", str),
+    "MDS_MULTICA_AGENTS": ("multica.agents", _json_dict),
     "MDS_MULTICA_POLL_INTERVAL": ("multica.poll_interval", float),
     "MDS_MULTICA_RUN_TIMEOUT": ("multica.run_timeout", float),
     "MDS_MAX_CONCURRENT_ROUNDS": ("multica.max_concurrent_rounds", int),
@@ -57,12 +69,37 @@ class MulticaSettings:
     token: str = ""        # PAT token；设置后启动时自动写入 ~/.multica/profiles/<profile>/config.json（已存在则不覆盖）。
                            # 供无法挂载 multica-home 目录的 Docker 运行时（named volume 模式）注入认证
     workspace_id: str = ""
+    # 别名表（可选）：别名 -> UUID。/ws、/agent 命令与 REST 参数都接受别名或 UUID
+    workspaces: Dict[str, str] = field(default_factory=dict)
     agent_id: str = ""
+    agents: Dict[str, str] = field(default_factory=dict)
     poll_interval: float = 1.2
-    run_wait_timeout: float = 300.0
-    run_timeout: float = 600.0
+    run_wait_timeout: float = 300.0   # run 未出现（如 agent 排队/daemon 离线）的等待上限
+    run_timeout: float = 7200.0       # 单轮 run 跟随上限（agent 长任务可达小时级）
     max_concurrent_rounds: int = 12   # 全局同时进行的对话轮数上限，超出排队
     max_session_queue: int = 5        # 单会话排队上限，超出直接拒绝该条消息
+
+    # ------------------------------------------------------------------
+    def resolve_workspace(self, s: str) -> str:
+        """别名 -> workspace UUID；不是已知别名则原样返回（视为 UUID）。"""
+        return self.workspaces.get(s, s)
+
+    def resolve_agent(self, s: str) -> str:
+        """别名 -> agent UUID；不是已知别名则原样返回（视为 UUID）。"""
+        return self.agents.get(s, s)
+
+    def workspace_alias(self, ws_id: str) -> str:
+        """UUID -> 别名；未配别名时返回原 UUID（首8位展示由调用方裁剪）。"""
+        for alias, wid in self.workspaces.items():
+            if wid == ws_id:
+                return alias
+        return ws_id
+
+    def agent_alias(self, agent_id: str) -> str:
+        for alias, aid in self.agents.items():
+            if aid == agent_id:
+                return alias
+        return agent_id
 
 
 @dataclass

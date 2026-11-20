@@ -6,6 +6,8 @@ services:
         # 国内网络镜像加速（按需修改/移除）
         PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
         MULTICA_DOWNLOAD_URL: ${MULTICA_DOWNLOAD_URL:-https://github.com/multica-ai/multica/releases/download}
+        # docker hub 拉不动时换基础镜像源，如 docker.m.daocloud.io/library/python:3.12-slim
+        PYTHON_BASE: ${PYTHON_BASE:-python:3.12-slim}
     image: multica-dingding-service:latest
     container_name: multica-dingding
     restart: unless-stopped
@@ -25,6 +27,9 @@ services:
       MDS_MULTICA_SERVER_URL: ${MDS_MULTICA_SERVER_URL:-}
       MDS_MULTICA_WORKSPACE_ID: ${MDS_MULTICA_WORKSPACE_ID:-}
       MDS_MULTICA_AGENT_ID: ${MDS_MULTICA_AGENT_ID:-}
+      # 别名表（JSON 对象字符串，见 .env.example；空 = 不启用）
+      MDS_MULTICA_WORKSPACES: ${MDS_MULTICA_WORKSPACES:-}
+      MDS_MULTICA_AGENTS: ${MDS_MULTICA_AGENTS:-}
       MDS_DINGTALK_CLIENT_ID: ${MDS_DINGTALK_CLIENT_ID:-}
       MDS_DINGTALK_CLIENT_SECRET: ${MDS_DINGTALK_CLIENT_SECRET:-}
       MDS_API_KEY: ${MDS_API_KEY:-}
