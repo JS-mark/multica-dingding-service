@@ -39,6 +39,7 @@ class ConversationManager:
         client: MulticaClient,
         store: SessionStore,
         settings: MulticaSettings,
+        shared_sem: Optional[asyncio.Semaphore] = None,
     ):
         self.client = client
         self.store = store
@@ -46,8 +47,8 @@ class ConversationManager:
         # 同一 session 的发送互斥：避免并发评论触发 run 匹配混乱
         self._locks: Dict[str, asyncio.Lock] = {}
         self._locks_guard = asyncio.Lock()
-        # 全局并发轮数上限
-        self._sem = asyncio.Semaphore(max(1, settings.max_concurrent_rounds))
+        # 全局并发轮数上限；多机器人共享同一把（预算不随机器人数量翻倍）
+        self._sem = shared_sem or asyncio.Semaphore(max(1, settings.max_concurrent_rounds))
         self._active_rounds = 0
         # 每会话排队计数（排队上限 max_session_queue）
         self._pending: Dict[str, int] = {}

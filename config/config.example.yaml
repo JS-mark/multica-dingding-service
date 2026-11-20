@@ -3,6 +3,8 @@ api:
   host: 0.0.0.0
   port: 8300
   api_key: ''
+  # 管理接口（/api/admin/*）鉴权 token；留空 = 首次启动自动生成并持久化到 data/admin_token（日志会打印一次）
+  admin_token: ''
 multica:
   binary: multica
   profile: ''
@@ -32,5 +34,20 @@ dingtalk:
   allowed_staff_ids: []
   allowed_user_ids: []
   allowed_nicks: []
+
+# 可选：额外接入多个机器人（各自独立的钉钉应用）。键 = slug（小写字母/数字/-），
+# 会话/白名单/默认路由互不影响；上面 dingtalk: 段 = 默认机器人（可不用）。
+# dingtalk_bots:
+#   ops:
+#     client_id: dingxxxxxxxx
+#     client_secret: xxx
+#     card_title: 运维机器人
+#     allowed_staff_ids: ['224434']
+#     # 可选：本机器人独立的默认工作区/agent（缺省回落全局 multica.*）
+#     multica:
+#       workspace_id: <uuid>
+#       agent_id: <uuid>
+#       agents: {coder: <uuid>}
+
 session:
   db_path: data/sessions.db

@@ -29,13 +29,30 @@ logger = logging.getLogger("multica_dingding.dingtalk")
 
 
 class DingTalkBot:
-    def __init__(self, settings: DingTalkSettings, manager: ConversationManager):
+    def __init__(
+        self,
+        settings: DingTalkSettings,
+        manager: ConversationManager,
+        slug: str = "default",
+    ):
         self.settings = settings
         self.manager = manager
+        # 机器人标识（多机器人配置里的 slug；default 的会话键保持老格式）
+        self.slug = slug
         self.client: Optional[dingtalk_stream.DingTalkStreamClient] = None
         self.connected = False
+        # 主 event loop：SDK 回调线程把异步处理投递回这里（会话/卡片都在主 loop）
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        # SDK 专用 loop（run_forever 线程内创建），shutdown 用
+        self._sdk_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._stopped = False
         self.dtk = DingTalkAsyncClient(settings.client_id, settings.client_secret)
+
+    def session_key(self, uid: str) -> str:
+        """会话键按机器人隔离：default 老格式 dingtalk:{uid}，其余 dingtalk:{slug}:{uid}。"""
+        if self.slug == "default":
+            return f"dingtalk:{uid}"
+        return f"dingtalk:{self.slug}:{uid}"
 
     async def aclose(self) -> None:
         try:
@@ -63,9 +80,8 @@ class DingTalkBot:
             return True
         return False
 
-    async def start(self) -> None:
-        """启动 WebSocket 长连接（阻塞运行，由 lifespan 以 task 方式拉起）。"""
-        self.loop = asyncio.get_running_loop()
+    async def _start_client(self) -> None:
+        """建立 Stream WebSocket 长连接并保持（跑在 SDK 专用 loop，见 run_forever）。"""
         credential = dingtalk_stream.Credential(
             self.settings.client_id, self.settings.client_secret
         )
@@ -74,11 +90,50 @@ class DingTalkBot:
             dingtalk_stream.chatbot.ChatbotMessage.TOPIC, _BotHandler(self)
         )
         self.connected = True
-        logger.info("钉钉 Stream 客户端已启动")
+        logger.info("钉钉 Stream 客户端[%s]已启动", self.slug)
         try:
             await self.client.start()
         finally:
             self.connected = False
+
+    def run_forever(self) -> None:
+        """阻塞运行（含重连退避），必须在独立线程调用（main.start_bot_task 负责拉线程）。
+
+        SDK 的建连/取 token 走【同步 requests】，凭证错误或网络故障时会长时间
+        阻塞——不能跑在主 event loop，否则一个机器人异常会拖垮所有机器人与
+        REST API。这里给 SDK 单独的 loop，与主 loop 完全隔离；消息处理经
+        self.loop（主 loop）投递回去。
+        """
+        self._sdk_loop = sdk = asyncio.new_event_loop()
+        asyncio.set_event_loop(sdk)
+        retry = 0
+        try:
+            while not self._stopped:
+                try:
+                    sdk.run_until_complete(self._start_client())
+                except asyncio.CancelledError:
+                    break
+                except Exception:  # noqa: BLE001
+                    retry += 1
+                    wait = min(30, 2 ** min(retry, 5))
+                    logger.exception(
+                        "钉钉 Stream[%s] 断开，%ss 后重连（第 %d 次）", self.slug, wait, retry
+                    )
+                    time.sleep(wait)
+                else:
+                    retry = 0
+                    time.sleep(1)
+        finally:
+            self.connected = False
+            sdk.close()
+
+    def shutdown(self) -> None:
+        """请求停止（幂等）：置停止标记并停掉 SDK loop，线程随后退出。"""
+        self._stopped = True
+        self.connected = False
+        loop = self._sdk_loop
+        if loop and loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
 
 
 class _BotHandler(dingtalk_stream.AsyncChatbotHandler):
@@ -203,7 +258,7 @@ class _BotHandler(dingtalk_stream.AsyncChatbotHandler):
         settings = self.bot.settings
         manager = self.bot.manager
         uid = incoming_message.sender_staff_id or incoming_message.sender_id
-        session_key = f"dingtalk:{uid}"
+        session_key = self.bot.session_key(uid)
         user_name = incoming_message.sender_nick or uid
         is_group = incoming_message.conversation_type == "2"
         title = settings.card_title or "Multica Agent"

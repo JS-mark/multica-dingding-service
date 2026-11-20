@@ -112,6 +112,57 @@ cp .env.example .env
 
 所有配置都有对应 `MDS_*` 环境变量（优先级更高）。白名单的环境变量为逗号分隔：`MDS_DINGTALK_ALLOWED_STAFF_IDS` / `MDS_DINGTALK_ALLOWED_USER_IDS` / `MDS_DINGTALK_ALLOWED_NICKS`。
 
+### 多机器人（可选）
+
+`dingtalk:` 段是默认机器人；再往下用 `dingtalk_bots:` 接入**多个额外机器人**（每个对应一个钉钉开放平台应用），互相完全隔离——各自的 Stream 连接与重连、白名单、会话（键 `dingtalk:{slug}:{staffId}`）、默认工作区/agent。仅 config.yaml 配置（额外机器人不走环境变量）：
+
+```yaml
+dingtalk:            # 默认机器人（老部署零改动；也可只用 dingtalk_bots）
+  client_id: dingxxx
+  client_secret: xxx
+  allowed_staff_ids: ['224434']
+
+dingtalk_bots:
+  ops:                       # slug：小写字母/数字/-（1-32位）
+    client_id: dingyyy
+    client_secret: yyy
+    card_title: 运维机器人
+    allowed_staff_ids: ['10086']        # 独立白名单，不继承默认机器人
+    multica:                            # 可选：独立默认路由，缺省回落全局 multica.*
+      workspace_id: <uuid>
+      agent_id: <uuid>
+```
+
+说明：
+
+- slug 仅用于会话键与日志；同 `client_id` 配两个机器人会被拒绝（会互相抢消息）
+- `max_concurrent_rounds` 是**全局**并发预算（所有机器人共享），不随机器人数量翻倍
+- `/health` 的 `bots` 字段展示每个机器人的 `connected` 状态；默认机器人在 `dingtalk.connected`（兼容监控）
+- 一个机器人掉线重连不影响其他机器人
+
+#### 管理接口（运行时增删机器人，热生效）
+
+额外机器人可以不碰配置文件，直接调管理接口（写 `data/bots.yaml`，加载时叠加在 config.yaml 之上，**改完即生效、无需重启**）。鉴权用 `X-Admin-Token`：启动时自动生成并持久化到 `data/admin_token`（日志打印一次），也可在配置里固定 `api.admin_token`。
+
+```bash
+TOKEN=$(docker exec multica-dingding cat /data/admin_token 2>/dev/null || cat data/admin_token)
+
+# 列表（含连接状态）
+curl -H "X-Admin-Token: $TOKEN" http://127.0.0.1:8300/api/admin/bots
+
+# 新增/更新
+curl -X PUT -H "X-Admin-Token: $TOKEN" -H 'Content-Type: application/json' \
+  http://127.0.0.1:8300/api/admin/bots/ops \
+  -d '{"client_id":"dingxxx","client_secret":"xxx","card_title":"运维机器人",
+       "allowed_staff_ids":["10086"],
+       "multica":{"agent_id":"<uuid>"}}'
+
+# 移除
+curl -X DELETE -H "X-Admin-Token: $TOKEN" http://127.0.0.1:8300/api/admin/bots/ops
+```
+
+注意：`default` 机器人由 config.yaml 管理（不能走此接口）；token 文件属主 0600，别提交进仓库。
+
 ## 三、启动
 
 ### Docker（推荐）
